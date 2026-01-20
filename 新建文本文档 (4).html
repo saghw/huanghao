@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>新年快乐 - 隔空手势交互</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: "微软雅黑", sans-serif;
+        }
+
+        body {
+            width: 100vw;
+            height: 100vh;
+            background: linear-gradient(135deg, #ff6b6b, #ff8e8e, #ffd93d);
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* 标题样式 */
+        .title {
+            text-align: center;
+            color: #fff;
+            padding: 20px 0;
+            text-shadow: 0 2px 10px rgba(0,0,0,0.3);
+            z-index: 10;
+            position: relative;
+        }
+
+        .title h1 {
+            font-size: 2.2rem;
+            margin-bottom: 10px;
+        }
+
+        .title p {
+            font-size: 1rem;
+            opacity: 0.9;
+        }
+
+        /* 摄像头容器 */
+        .camera-container {
+            width: 90%;
+            height: 60vh;
+            margin: 0 auto;
+            position: relative;
+            border-radius: 20px;
+            overflow: hidden;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.2);
+            z-index: 5;
+        }
+
+        #video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1); /* 镜像翻转，符合自拍习惯 */
+        }
+
+        #canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            transform: scaleX(-1); /* 和视频同步镜像 */
+        }
+
+        /* 特效元素 */
+        .effect {
+            position: absolute;
+            color: #fff;
+            font-size: 1.5rem;
+            text-shadow: 0 2px 8px rgba(0,0,0,0.5);
+            z-index: 8;
+            opacity: 0;
+            transition: all 0.5s ease;
+        }
+
+        /* 烟花动画 */
+        @keyframes firework {
+            0% {
+                transform: translate(-50%, -50%) scale(0);
+                opacity: 1;
+            }
+            100% {
+                transform: translate(-50%, -50%) scale(3);
+                opacity: 0;
+            }
+        }
+
+        .firework {
+            position: absolute;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: radial-gradient(circle, #fff, #ffd93d, #ff6b6b);
+            box-shadow: 0 0 20px #fff;
+            opacity: 0;
+            animation: firework 1s ease-out forwards;
+        }
+
+        /* 适配小屏手机 */
+        @media (max-width: 375px) {
+            .title h1 {
+                font-size: 1.8rem;
+            }
+            .camera-container {
+                height: 55vh;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="title">
+        <h1>新年快乐 🧧</h1>
+        <p>隔空比心/OK/数字8 触发特效</p>
+    </div>
+    <div class="camera-container">
+        <video id="video" autoplay muted playsinline></video>
+        <canvas id="canvas"></canvas>
+    </div>
+
+    <!-- 引入TensorFlow.js和HandPose模型 -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.14.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/hand-pose-detection@2.0.0/dist/hand-pose-detection.min.js"></script>
+
+    <script>
+        // 全局变量
+        let video, canvas, ctx;
+        let detector; // 手部检测器
+        let lastGestureTime = 0; // 最后一次触发手势的时间（防重复）
+        const GESTURE_COOLDOWN = 1500; // 手势冷却时间（毫秒）
+
+        // 初始化函数
+        async function init() {
+            // 获取DOM元素
+            video = document.getElementById('video');
+            canvas = document.getElementById('canvas');
+            ctx = canvas.getContext('2d');
+
+            // 适配canvas尺寸
+            function resizeCanvas() {
+                canvas.width = video.offsetWidth;
+                canvas.height = video.offsetHeight;
+            }
+            resizeCanvas();
+            window.addEventListener('resize', resizeCanvas);
+
+            // 初始化摄像头
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { 
+                        facingMode: 'user', // 前置摄像头
+                        width: { ideal: window.innerWidth },
+                        height: { ideal: window.innerHeight }
+                    },
+                    audio: false
+                });
+                video.srcObject = stream;
+                video.play();
+            } catch (err) {
+                alert('请允许访问摄像头以使用隔空手势功能！\n错误：' + err.message);
+                console.error('摄像头初始化失败：', err);
+                return;
+            }
+
+            // 加载手部检测模型
+            try {
+                const model = handPoseDetection.SupportedModels.MediaPipeHands;
+                const detectorConfig = {
+                    runtime: 'tfjs',
+                    modelType: 'lite', // 轻量版，适配移动端
+                    maxHands: 1 // 只检测一只手
+                };
+                detector = await handPoseDetection.createDetector(model, detectorConfig);
+                console.log('手部模型加载成功！');
+                
+                // 开始检测
+                detectHands();
+            } catch (err) {
+                alert('模型加载失败，请检查网络！');
+                console.error('模型加载失败：', err);
+            }
+        }
+
+        // 手部检测主函数
+        async function detectHands() {
+            if (!detector || video.paused) {
+                requestAnimationFrame(detectHands);
+                return;
+            }
+
+            // 检测手部关键点
+            const hands = await detector.estimateHands(video, {
+                flipHorizontal: true // 镜像翻转，和视频同步
+            });
+
+            // 清空canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 如果检测到手部
+            if (hands.length > 0) {
+                const hand = hands[0];
+                const keypoints = hand.keypoints;
+
+                // 绘制手部关键点和连线（可视化）
+                drawHand(keypoints);
+
+                // 判断手势
+                const gesture = recognizeGesture(keypoints);
+                if (gesture && Date.now() - lastGestureTime > GESTURE_COOLDOWN) {
+                    triggerEffect(gesture, keypoints[8]); // 8号关键点是食指指尖
+                    lastGestureTime = Date.now();
+                }
+            }
+
+            // 循环检测
+            requestAnimationFrame(detectHands);
+        }
+
+        // 绘制手部关键点和连线
+        function drawHand(keypoints) {
+            // 关键点连接顺序（手部骨骼）
+            const connections = [
+                [0,1], [1,2], [2,3], [3,4], // 拇指
+                [0,5], [5,6], [6,7], [7,8], // 食指
+                [0,9], [9,10], [10,11], [11,12], // 中指
+                [0,13], [13,14], [14,15], [15,16], // 无名指
+                [0,17], [17,18], [18,19], [19,20] // 小指
+            ];
+
+            // 绘制连线
+            ctx.strokeStyle = '#00ff00';
+            ctx.lineWidth = 3;
+            connections.forEach(([start, end]) => {
+                ctx.beginPath();
+                ctx.moveTo(keypoints[start].x, keypoints[start].y);
+                ctx.lineTo(keypoints[end].x, keypoints[end].y);
+                ctx.stroke();
+            });
+
+            // 绘制关键点
+            ctx.fillStyle = '#ff0000';
+            keypoints.forEach(point => {
+                ctx.beginPath();
+                ctx.arc(point.x, point.y, 5, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+
+        // 手势识别逻辑
+        function recognizeGesture(keypoints) {
+            // 获取关键点位坐标
+            const thumbTip = keypoints[4]; // 拇指尖
+            const indexTip = keypoints[8]; // 食指尖
+            const middleTip = keypoints[12]; // 中指尖
+            const ringTip = keypoints[16]; // 无名指尖
+            const pinkyTip = keypoints[20]; // 小指尖
+
+            // 计算两点之间距离
+            const getDistance = (p1, p2) => {
+                return Math.hypot(p1.x - p2.x, p1.y - p2.y);
+            };
+
+            // 1. 比心手势（拇指和食指指尖靠近，其他手指弯曲）
+            const thumbIndexDist = getDistance(thumbTip, indexTip);
+            const isHeart = thumbIndexDist < 30 && 
+                            keypoints[12].y > keypoints[9].y && // 中指弯曲
+                            keypoints[16].y > keypoints[13].y && // 无名指弯曲
+                            keypoints[20].y > keypoints[17].y; // 小指弯曲
+
+            // 2. OK手势（拇指和食指围成圈，其他手指伸直）
+            const isOK = thumbIndexDist < 40 && 
+                         keypoints[8].y < keypoints[6].y && // 食指伸直
+                         keypoints[12].y < keypoints[10].y && // 中指伸直
+                         keypoints[16].y < keypoints[14].y; // 无名指伸直
+
+            // 3. 数字8手势（食指和中指伸直分开，其他手指弯曲）
+            const indexMiddleDist = getDistance(indexTip, middleTip);
+            const isEight = indexMiddleDist > 40 && 
+                            keypoints[8].y < keypoints[6].y && // 食指伸直
+                            keypoints[12].y < keypoints[10].y && // 中指伸直
+                            keypoints[4].y > keypoints[2].y && // 拇指弯曲
+                            keypoints[16].y > keypoints[14].y; // 无名指弯曲
+
+            // 返回识别到的手势
+            if (isHeart) return 'heart';
+            if (isOK) return 'ok';
+            if (isEight) return 'eight';
+            return null;
+        }
+
+        // 触发新年特效
+        function triggerEffect(gesture, position) {
+            // 转换坐标（因为canvas镜像了，需要还原到页面坐标）
+            const rect = canvas.getBoundingClientRect();
+            const x = rect.left + (canvas.width - position.x);
+            const y = rect.top + position.y;
+
+            // 根据不同手势触发不同特效
+            switch(gesture) {
+                case 'heart':
+                    createTextEffect('晶晶宝贝新年快乐 ❤️', x, y);
+                    createFirework(x, y);
+                    break;
+                case 'ok':
+                    createTextEffect('万事大吉 ✨', x, y);
+                    createFirework(x, y);
+                    createFirework(x + 50, y - 30);
+                    break;
+                case 'eight':
+                    createTextEffect('恭喜发财 🧧', x, y);
+                    createFirework(x, y);
+                    createFirework(x - 50, y + 30);
+                    createFirework(x + 50, y - 50);
+                    break;
+            }
+        }
+
+        // 创建文字特效
+        function createTextEffect(text, x, y) {
+            const effect = document.createElement('div');
+            effect.className = 'effect';
+            effect.textContent = text;
+            effect.style.left = `${x}px`;
+            effect.style.top = `${y}px`;
+            document.body.appendChild(effect);
+
+            // 动画效果
+            setTimeout(() => {
+                effect.style.opacity = '1';
+                effect.style.transform = 'translateY(-20px)';
+            }, 10);
+
+            // 移除元素
+            setTimeout(() => {
+                effect.style.opacity = '0';
+                effect.style.transform = 'translateY(-40px)';
+                setTimeout(() => {
+                    document.body.removeChild(effect);
+                }, 500);
+            }, 1500);
+        }
+
+        // 创建烟花特效
+        function createFirework(x, y) {
+            const firework = document.createElement('div');
+            firework.className = 'firework';
+            firework.style.left = `${x}px`;
+            firework.style.top = `${y}px`;
+            firework.style.animationDelay = `${Math.random() * 0.3}s`;
+            document.body.appendChild(firework);
+
+            // 移除烟花元素
+            setTimeout(() => {
+                document.body.removeChild(firework);
+            }, 1000);
+        }
+
+        // 页面加载完成后初始化
+        window.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>
